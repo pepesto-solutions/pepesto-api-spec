@@ -38,18 +38,6 @@ docker run --rm -p 8081:8080 \
 
 To actually fire requests from the UI, paste your `pep_sk_…` key into the **Authorize** dialog (the `bearerAuth` scheme).
 
-### Swagger Editor (live-edit + preview, via Docker)
-
-```bash
-docker run --rm -p 8082:8080 \
-  -e SWAGGER_FILE=/spec/openapi.yaml \
-  -v "$(pwd):/spec" \
-  swaggerapi/swagger-editor
-# open http://localhost:8082
-```
-
-The editor hot-reloads on save, so you can edit `openapi.yaml` in your IDE and see the rendered docs / try-it-out panel update in the browser.
-
 # Formats
 
 ## Bundle to JSON
