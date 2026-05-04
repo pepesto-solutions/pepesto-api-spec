@@ -1,0 +1,1555 @@
+openapi: 3.0.3
+info:
+  title: Pepesto Grocery API
+  version: "1.0.0"
+  description: |
+    Recipe → matched grocery cart across 26 European supermarkets.
+
+    The Pepesto Grocery API turns a recipe (URL, free-form text, or image) into a matched
+    basket of real supermarket products with live prices, across 26 European supermarkets in
+    13 countries. It also exposes the recipe knowledge graph, full catalog dumps, promotional
+    SKUs, and a session/checkout pair for driving automated cart fill on the supermarket's
+    own site.
+
+    ## Authentication
+
+    All endpoints except `POST /link` require a Bearer token in the `Authorization` header:
+
+    ```
+    Authorization: Bearer pep_sk_…
+    ```
+
+    Mint a key by calling `POST /link` with the email address you used at checkout. The key
+    is returned **only once** — store it immediately. See
+    <https://www.pepesto.com/ai-grocery-shopping-agent/> for the full setup guide.
+
+    ## Pricing model
+
+    Pay-as-you-go credits, billed per call. `POST /credits` and `POST /link` are free.
+    Per-call prices are documented under each endpoint and at
+    <https://www.pepesto.com/pricing/>. Credits never expire.
+
+    ## Common shapes
+
+    - **Prices** are integers in the smallest currency unit (e.g. cents, pence, øre).
+    - **`KgToken`** is an opaque recipe handle returned by `/parse` and `/suggest` that you
+      pass to `/products` to map ingredients to real SKUs.
+    - **`session_token`** is a per-product handle from `/products` you pass to `/session`.
+    - **Currencies**: EUR, GBP, CHF, NOK, PLN, BGN, DKK.
+
+    ## Reference implementations
+
+    - MCP server: <https://github.com/pepesto-solutions/pepesto-mcp>
+    - Code examples (one per supermarket): <https://github.com/pepesto-solutions/pepesto-api-examples>
+  contact:
+    name: Pepesto
+    url: https://www.pepesto.com/contact
+  x-logo:
+    url: https://www.pepesto.com/favicon.ico
+
+servers:
+  - url: https://s.pepesto.com/api
+    description: Production
+
+security:
+  - bearerAuth: []
+
+tags:
+  - name: Account
+    description: API-key provisioning and credit balance.
+  - name: Recipes
+    description: Parse and search recipes; produces `KgToken`s.
+  - name: Cart
+    description: Map recipes/ingredients to real supermarket products and build carts.
+  - name: Checkout
+    description: Drive the supermarket's own site to fill the basket end-to-end.
+  - name: Catalog
+    description: Full and promotional product dumps for a given supermarket.
+
+paths:
+  /link:
+    post:
+      tags: [Account]
+      summary: Mint an API key
+      description: |
+        Creates an API key linked to a previously completed Stripe payment. The key is
+        returned **only once** — store it immediately. Pass an optional `alias` when you
+        need multiple keys for the same email (e.g. one per environment).
+      operationId: createApiKey
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LinkRequest"
+            examples:
+              basic:
+                summary: Mint a single key
+                value:
+                  email: you@example.com
+              aliased:
+                summary: Mint a named key
+                value:
+                  email: you@example.com
+                  alias: production
+      responses:
+        "200":
+          description: API key created.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LinkResponse"
+
+  /credits:
+    post:
+      tags: [Account]
+      summary: Check remaining credits
+      description: Returns the remaining credit balance for the configured API key.
+      operationId: getCredits
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+      responses:
+        "200":
+          description: Credit balance.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CreditsResponse"
+
+  /oneshot:
+    post:
+      tags: [Cart]
+      summary: One-shot recipe → checkout-ready cart
+      description: |
+        Combines parse + product matching + session creation in a single call. Pass any
+        combination of recipe URLs, free-form shopping text, and/or a base64-encoded image,
+        plus a target supermarket. Returns a `redirect_url` that opens the Pepesto checkout
+        UI with the matched cart pre-filled.
+
+        Use this for the simplest end-to-end flow. Use `/parse` + `/products` + `/session`
+        for finer control over individual steps.
+      operationId: oneshot
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/OneshotRequest"
+            examples:
+              recipeUrlPlusExtras:
+                summary: Recipe URL + extra free-text items at Tesco
+                value:
+                  content_urls:
+                    - https://www.bbcgoodfood.com/recipes/pizza-margherita-4-easy-steps
+                  content_text: "also add sparkling water and olive oil"
+                  supermarket_domain: tesco.com
+              shoppingListOnly:
+                summary: Plain shopping list at Coop CH
+                value:
+                  content_text: "milk, bananas, sourdough bread, olive oil"
+                  supermarket_domain: coop.ch
+      responses:
+        "200":
+          description: Checkout-ready redirect URL.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OneshotResponse"
+              examples:
+                redirect:
+                  summary: Pepesto-hosted result page
+                  value:
+                    redirect_url: https://app.pepesto.com/composed?force=1&req=GigKJmFsc28g
+
+  /parse:
+    post:
+      tags: [Recipes]
+      summary: Parse a recipe into structured ingredients
+      description: |
+        Extracts a structured recipe (title, ingredients, steps, nutrition, image) from a
+        URL or free-form text. Returns a `kg_token` you can pass to `/products` to match
+        ingredients to real SKUs.
+
+        Provide exactly one of `recipe_url` or `recipe_text`.
+      operationId: parseRecipe
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ParseRequest"
+            examples:
+              fromUrl:
+                summary: Parse from a recipe URL
+                value:
+                  recipe_url: https://www.bbcgoodfood.com/recipes/pizza-margherita-4-easy-steps
+                  locale: en-GB
+                  generate_image: false
+              fromText:
+                summary: Parse from free-form text
+                value:
+                  recipe_text: |
+                    Carbonara for 2: 200g spaghetti, 100g guanciale, 2 eggs,
+                    50g pecorino, black pepper.
+                  locale: en-GB
+      responses:
+        "200":
+          description: Structured recipe + `kg_token`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ParseResponse"
+              examples:
+                pizzaMargherita:
+                  summary: Pizza Margherita parsed from a recipe URL
+                  value:
+                    recipe:
+                      title: Pizza Margherita
+                      ingredients:
+                        - 300g flour
+                        - 1tsp yeast
+                        - salt
+                        - olive oil
+                        - tomato sauce
+                        - basil
+                        - 1 garlic clove
+                        - 130g mozzarella cheese
+                        - parmesan cheese
+                        - 100g cherry tomatoes
+                      steps:
+                        - "To make the base, combine the flour, yeast, and salt in a large bowl. Make a well in the center and pour in 200ml of warm water and the olive oil. Mix until a soft dough forms, then knead on a lightly floured surface for 5 minutes until smooth. Cover and set aside."
+                        - "For the sauce, mix the passata, basil, and crushed garlic together, and season to taste."
+                        - "Divide the dough into two balls. On a floured surface, roll each ball into a large, thin round, about 25cm across."
+                        - "Preheat the oven to 240°C (220°C fan/gas 8) with a baking sheet on the top shelf. Spread the sauce over the pizza bases. Scatter with cheese and tomatoes, drizzle with olive oil, and season."
+                        - "Place one pizza on its baking sheet onto the preheated sheet in the oven. Bake for 8-10 minutes until crisp. Serve with a drizzle of olive oil and basil leaves, if using. Repeat with the remaining pizza."
+                      image_url: https://storage.googleapis.com/pepesto_recipe_images/placeholder.webp
+                      nutrition:
+                        calories: 1773
+                        carbohydrates_grams: 244
+                        protein_grams: 70
+                        fat_grams: 52
+                      portions:
+                        from: 0
+                        to: 0
+                      kg_token: EhIKEFBpenp
+
+  /suggest:
+    post:
+      tags: [Recipes]
+      summary: Search the recipe knowledge graph
+      description: |
+        Searches Pepesto's recipe graph (1M+ recipes) by free-text query. The query may
+        include cuisine, dietary tags, ingredients to include or avoid, time constraints,
+        and servings (e.g. "vegan keto dinner low on carb for two"). Always returns 3
+        recipes plus a short natural-language reply; each recipe includes a `kg_token`
+        you can pass to `/products`.
+
+        Returned images are licensed for display in your app or website without
+        attribution.
+      operationId: suggestRecipes
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SuggestRequest"
+            examples:
+              keto:
+                summary: Keto dinner, low-carb, high-protein
+                value:
+                  query: "Find me a keto dinner low on carb and high on protein"
+              veganQuick:
+                summary: Quick vegan pasta for two
+                value:
+                  query: "vegan pasta dinner for two, ready in 20 minutes"
+              personalised:
+                summary: Personalised query — German, 2 portions, prefer Coop CH
+                value:
+                  query: "easy weeknight dinner"
+                  personalization:
+                    locale: de-DE
+                    portions: 2
+                    supermarket_domain: coop.ch
+      responses:
+        "200":
+          description: 3 matching recipes plus `short_response`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuggestResponse"
+              examples:
+                ketoDinners:
+                  summary: Three keto dinners returned for a low-carb / high-protein query
+                  value:
+                    recipes:
+                      - title: Smoked Salmon Keto Pinwheels
+                        ingredients:
+                          - 1/8 lemon
+                          - 1 garlic clove
+                          - dill
+                          - 110g cream cheese
+                          - parmesan cheese
+                          - 700g salmon fillet (~3)
+                          - olive oil
+                          - smoked paprika
+                          - salt
+                          - black pepper
+                        steps:
+                          - "Preheat oven to 200C and grease a baking dish."
+                          - "Mix cream cheese, parmesan, garlic, herbs, lemon zest, salt, and pepper until smooth."
+                          - "Spread the cream cheese mixture evenly over thin salmon slices."
+                          - "Roll up the salmon slices tightly into pinwheels and place in the baking dish."
+                          - "Brush with olive oil and sprinkle with smoked paprika."
+                          - "Bake for 12-15 minutes until salmon is cooked through."
+                          - "Broil for the last 1-2 minutes to crisp the edges."
+                        image_url: https://storage.googleapis.com/pepesto_recipe_images/c24032ccfaa8768c0a8b686890.webp
+                        nutrition:
+                          calories: 1884
+                          carbohydrates_grams: 4
+                          protein_grams: 151
+                          fat_grams: 139
+                        allergens: [fish]
+                        portions: { from: 0, to: 0 }
+                        kg_token: Eh4KHFNtb
+                      - title: Keto Burger Steak with Mushroom Gravy
+                        ingredients:
+                          - parsley
+                          - 250g button mushrooms
+                          - 1 egg
+                          - 30g butter
+                          - 120ml full-fat cooking cream
+                          - 450g ground beef
+                          - salt
+                          - onion powder
+                          - garlic powder
+                          - black pepper
+                          - beef broth
+                          - mustard
+                          - worcestershire sauce
+                        steps:
+                          - "Combine ground beef, egg, onion powder, garlic powder, salt, and pepper. Form into 4 oval patties."
+                          - "Brown patties in a skillet for 4-5 minutes per side. Remove and set aside."
+                          - "Sauté sliced mushrooms in butter until golden brown."
+                          - "Add beef broth, Worcestershire sauce, and Dijon mustard. Simmer to reduce slightly."
+                          - "Stir in heavy cream and simmer until gravy thickens."
+                          - "Return patties to the pan, spoon gravy over them, and warm through."
+                        image_url: https://storage.googleapis.com/pepesto_recipe_images/a41f39a037c17eb720d273d3e1.webp
+                        nutrition:
+                          calories: 1898
+                          carbohydrates_grams: 10
+                          protein_grams: 109
+                          fat_grams: 157
+                        allergens: [eggs, mustard]
+                        portions: { from: 1, to: 2 }
+                        kg_token: EicKJUtl
+                      - title: Creamy Garlic Parmesan Salmon
+                        ingredients:
+                          - 1/8 lemon
+                          - 4 garlic cloves
+                          - 60g baby spinach
+                          - parsley
+                          - 30g butter
+                          - 250ml full-fat cooking cream
+                          - 50g parmesan cheese
+                          - 350g salmon fillet (~1)
+                          - olive oil
+                          - salt
+                          - black pepper
+                        steps:
+                          - "Pat salmon fillets dry and season with salt and pepper."
+                          - "Sear salmon in olive oil in a skillet over medium-high heat for 4-5 minutes per side until golden brown. Remove salmon from pan."
+                          - "Melt butter in the same pan over medium heat. Sauté minced garlic for 1 minute until fragrant."
+                          - "Reduce heat to low, add heavy cream, and simmer for 2-3 minutes. Stir in parmesan cheese and lemon juice until smooth."
+                          - "Add spinach to the sauce and stir until wilted."
+                          - "Return salmon to the pan, spoon sauce over it, and simmer for 1 minute. Garnish with parsley."
+                        image_url: https://storage.googleapis.com/pepesto_recipe_images/32092390e8bcd31cf77beb3465.webp
+                        nutrition:
+                          calories: 2043
+                          carbohydrates_grams: 17
+                          protein_grams: 95
+                          fat_grams: 178
+                        allergens: [fish]
+                        portions: { from: 1, to: 3 }
+                        kg_token: Eh1KHUNyZW
+                    short_response: "Sure thing! Here are some keto dinner options that are low in carbs and high in protein."
+
+  /products:
+    post:
+      tags: [Cart]
+      summary: Map recipes/ingredients to real supermarket products
+      description: |
+        Maps one or more recipe `KgToken`s — and an optional manual shopping list — to
+        concrete supermarket SKUs with prices, images, and quantities. Items are merged
+        across recipes to reduce waste. Each ingredient line returns multiple ranked
+        product matches; the first is the recommended pick.
+      operationId: products
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ProductsRequest"
+            examples:
+              weeklyMealPlan:
+                summary: Five recipes merged into one Sainsbury's basket
+                value:
+                  recipe_kg_tokens:
+                    - kg_xxx_pizza
+                    - kg_xxx_carbonara
+                    - kg_xxx_curry
+                    - kg_xxx_bolognese
+                    - kg_xxx_braisedbeef
+                  supermarket_domain: sainsburys.co.uk
+              recipeAndManual:
+                summary: Recipe + extra items
+                value:
+                  recipe_kg_tokens:
+                    - kg_xxx_zurchergeschnetzeltes
+                  supermarket_domain: coop.ch
+                  manual_shopping_list: "milk, bananas, kitchen towel"
+              historical:
+                summary: Same basket priced as of a past date
+                value:
+                  recipe_kg_tokens: [kg_xxx_carbonara]
+                  supermarket_domain: sainsburys.co.uk
+                  as_of_date: "2026-04-30"
+      responses:
+        "200":
+          description: Matched product list.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProductsResponse"
+              examples:
+                sainsburysBasket:
+                  summary: Truncated Sainsbury's basket — three items, varied classifications
+                  value:
+                    items:
+                      - item_name: Parsley
+                        products:
+                          - product:
+                              product_name: Sainsbury's Fresh Packed Flat Leaf Parsley 30g
+                              quantity: { grams: 30 }
+                              price:
+                                price: 55
+                                promotion: {}
+                              product_id: https://www.sainsburys.co.uk/gol-ui/product/sainsbury-s-fresh-packed-flat-leaf-parsley-30g
+                              image_url: https://assets.sainsburys-groceries.co.uk/gol/445887/image.jpg
+                              classification: {}
+                              session_token: tok_parsley_a
+                            session_token: tok_parsley_a
+                            num_units_to_buy: 1
+                          - product:
+                              product_name: Sainsbury's Fresh Living Flat Leaf Parsley Pot
+                              quantity: { pieces: 1 }
+                              price:
+                                price: 135
+                                promotion:
+                                  promo: true
+                                  promo_percentage: 15
+                              product_id: https://www.sainsburys.co.uk/gol-ui/product/sainsbury-s-fresh-living-flat-leaf-parsley-pot
+                              image_url: https://assets.sainsburys-groceries.co.uk/gol/6034606/image.jpg
+                              classification: { is_bio: false, is_frozen: false, is_substitution: false }
+                              session_token: tok_parsley_b
+                            session_token: tok_parsley_b
+                            num_units_to_buy: 1
+                      - item_name: Oregano
+                        products:
+                          - product:
+                              product_name: Stamford Street Co. Oregano 18g
+                              quantity: { grams: 18 }
+                              price:
+                                price: 80
+                                promotion: {}
+                              product_id: https://www.sainsburys.co.uk/gol-ui/product/stamford-street-co-oregano-18g
+                              image_url: https://assets.sainsburys-groceries.co.uk/gol/8191679/image.jpg
+                              classification: { is_substitution: true }
+                              session_token: tok_oregano_a
+                            session_token: tok_oregano_a
+                      - item_name: Butter
+                        products:
+                          - product:
+                              product_name: Yeo Valley Organic Unsalted Butter 200g
+                              quantity: { grams: 200 }
+                              price:
+                                price: 225
+                                promotion:
+                                  promo: true
+                                  promo_percentage: 27
+                              product_id: https://www.sainsburys.co.uk/gol-ui/product/yeo-valley-organic-unsalted-butter-200g
+                              image_url: https://assets.sainsburys-groceries.co.uk/gol/8161458/image.jpg
+                              classification: { is_bio: true }
+                              session_token: tok_butter_a
+                            session_token: tok_butter_a
+                            num_units_to_buy: 1
+                          - product:
+                              product_name: Lurpak Unsalted Butter
+                              quantity: { grams: 200 }
+                              price:
+                                price: 195
+                                promotion:
+                                  promo: true
+                                  promo_percentage: 30
+                              product_id: https://www.sainsburys.co.uk/gol-ui/product/lurpak-unsalted-butter-200g
+                              image_url: https://assets.sainsburys-groceries.co.uk/gol/8156815/image.jpg
+                              classification: { is_bio: false, is_frozen: false, is_substitution: false }
+                              session_token: tok_butter_b
+                            session_token: tok_butter_b
+                            num_units_to_buy: 1
+                    missing_items: [onion powder]
+                    currency: GBP
+
+  /session:
+    post:
+      tags: [Checkout]
+      summary: Create a checkout session
+      description: |
+        Wraps a final basket as a session for the chosen supermarket. The returned
+        `session_id` is what you feed to `/checkout` to drive the supermarket's own
+        site.
+
+        Provide `skus` (resolved tokens from `/products`), `unresolved_items` (free-text
+        items the checkout agent will search for at run time), or both.
+
+        Set `charge_user: true` to bill the end user directly via a hosted Pepesto
+        payment link instead of consuming this API key's credits — see the
+        `chargeUserCheckout` example.
+      operationId: createSession
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SessionRequest"
+            examples:
+              fromProducts:
+                summary: Build a session from resolved /products tokens
+                value:
+                  supermarket_domain: coop.ch
+                  skus:
+                    - session_token: eyJwcm9kdWN0X2lkIjogImh0dHBzOi8vY29vcC5jaC9wYXN0YS8xMjMifQ==
+                      num_units_to_buy: 1
+                    - session_token: eyJwcm9kdWN0X2lkIjogImh0dHBzOi8vY29vcC5jaC90b21hdG9lcy80NTYifQ==
+                      num_units_to_buy: 2
+              withUnresolvedItems:
+                summary: Mix resolved tokens with free-text items the agent will find at checkout
+                value:
+                  supermarket_domain: sainsburys.co.uk
+                  skus:
+                    - session_token: tok_butter_a
+                      num_units_to_buy: 1
+                  unresolved_items: ["sourdough loaf", "bunch of mint"]
+              chargeUserCheckout:
+                summary: Charge the end user directly with a £2.00 referrer markup
+                value:
+                  supermarket_domain: sainsburys.co.uk
+                  skus:
+                    - session_token: tok_butter_a
+                      num_units_to_buy: 1
+                  charge_user: true
+                  charge_user_amount: 2.00
+                  charge_user_webhook: https://yourapp.example.com/hooks/pepesto/session-ready
+      responses:
+        "200":
+          description: Session created.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SessionResponse"
+              examples:
+                created:
+                  summary: Standard creation — session ready immediately
+                  value:
+                    session_id: sess_01HZAB7WK4
+                chargeUserPending:
+                  summary: charge_user flow — redirect the user to complete payment
+                  value:
+                    session_id: sess_01HZAB7WK4
+                    payment_redirect_url: https://pay.pepesto.com/p/eyJzZXNzaW9uX2lkIjoic2Vzc18wMUhaQUI3V0s0In0=
+
+  /checkout:
+    post:
+      tags: [Checkout]
+      summary: One iteration of the automated-checkout loop
+      description: |
+        Drives one step of the AI-guided checkout loop. Each call returns a
+        single instruction wrapped in `proto` for the client to execute — the
+        instruction kind depends on what surface is driving the loop (browser
+        running JS, iOS app, server-side agent, chat surface, …). Send the
+        outcome back as `prev_turn_response` (plus an optional screenshot) to
+        advance the session.
+
+        The session must already exist — clients never create one via this API.
+        Obtain `continue_session_id` from `/session` or the Pepesto app and echo
+        it on every subsequent request for the same session.
+      operationId: checkoutIteration
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CheckoutRequest"
+            examples:
+              firstTurn:
+                summary: Kick off the loop — no prior turn yet
+                value:
+                  continue_session_id: sess_01HZAB7WK4
+              afterTurnSuccess:
+                summary: Return the previous turn's result (success)
+                value:
+                  continue_session_id: sess_01HZAB7WK4
+                  prev_turn_response:
+                    result: "0.4137298732419"
+                    error: ""
+              afterTurnFailureWithScreenshot:
+                summary: Previous turn failed; attach a screenshot the server requested
+                value:
+                  continue_session_id: sess_01HZAB7WK4
+                  prev_turn_response:
+                    result: ""
+                    error: "Timeout: execution exceeded 5000ms"
+                  screenshot: iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkAAIAAAoAAv/lxKUAAAAASUVORK5CYII=
+      responses:
+        "200":
+          description: Next instruction.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CheckoutResponse"
+              examples:
+                runJs:
+                  summary: Browser-style JS instruction (one possible turn kind)
+                  value:
+                    proto:
+                      session_id: sess_01HZAB7WK4
+                      attach_screenshot_on_next_turn: false
+                      run_js:
+                        js: |
+                          async function sleepAndReturnRandomNumber() {
+                            await new Promise((resolve) => setTimeout(resolve, 1200));
+                            return String(Math.random());
+                          }
+                        func: sleepAndReturnRandomNumber
+                        max_execute_time_msec: 5000
+                runJsWithScreenshot:
+                  summary: Same, but the server wants a screenshot back next turn
+                  value:
+                    proto:
+                      session_id: sess_01HZAB7WK4
+                      attach_screenshot_on_next_turn: true
+                      run_js:
+                        js: |
+                          function readCartTotal() {
+                            return document.querySelector('[data-testid=cart-total]')?.textContent ?? '';
+                          }
+                        func: readCartTotal
+                        max_execute_time_msec: 0
+
+  /catalog:
+    post:
+      tags: [Catalog]
+      summary: Full SKU dump for a supermarket
+      description: |
+        Returns Pepesto's full indexed catalog for a supermarket — typically
+        1,000–2,000 SKUs of common cooking ingredients keyed by their canonical
+        URL on the supermarket's site.
+
+        Use this only for genuine market analysis or storefront builds; for normal
+        recipe-to-cart flows, prefer `/oneshot` or `/products`. **Cache results
+        aggressively** — at most one call per day per supermarket is recommended.
+      operationId: catalogDump
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CatalogRequest"
+            examples:
+              coopCh:
+                summary: Coop CH catalog
+                value:
+                  supermarket_domain: coop.ch
+              ahNl:
+                summary: Albert Heijn (AH) catalog
+                value:
+                  supermarket_domain: ah.nl
+      responses:
+        "200":
+          description: Full catalog.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CatalogResponse"
+              examples:
+                ahNlSample:
+                  summary: Truncated AH NL response — varied unit kinds, tags, and a promo
+                  value:
+                    parsed_products:
+                      https://www.ah.nl/producten/product/wi100232/ah-rode-druiven-pitloos:
+                        entity_name: Grapes
+                        names:
+                          en: AH Red seedless grapes
+                          nl: AH Rode druiven pitloos
+                        price: 279
+                        currency: EUR
+                        quantity_str: 500g
+                        quantity:
+                          Unit: { HundredGrams: 5 }
+                          accurate_grams: 500
+                      https://www.ah.nl/producten/product/wi101130/ah-biologisch-komkommer:
+                        entity_name: Cucumbers
+                        tags: [bio]
+                        names:
+                          en: AH Organic cucumber
+                          nl: AH Biologisch Komkommer
+                        price: 179
+                        currency: EUR
+                        promo: true
+                        quantity_str: 1 piece
+                        quantity:
+                          Unit: { Pieces: 1 }
+                      https://www.ah.nl/producten/product/wi101170/ah-biologisch-mai%CC%88skorrels:
+                        entity_name: Canned corn
+                        tags: [bio, canned]
+                        names:
+                          en: AH Organic corn kernels
+                          nl: AH Biologisch Maïskorrels
+                        price: 149
+                        currency: EUR
+                        quantity_str: 340g
+                        quantity:
+                          Unit: { HundredGrams: 3 }
+                          accurate_grams: 340
+                      https://www.ah.nl/producten/product/wi101200/ah-biologisch-natuurazijn:
+                        entity_name: Vinegar
+                        tags: [bio]
+                        names:
+                          en: AH Organic natural vinegar
+                          nl: AH Biologisch Natuurazijn
+                        price: 99
+                        currency: EUR
+                        quantity_str: 1 l
+                        quantity:
+                          Unit: { Milliliters: 1000 }
+
+  /promotions:
+    post:
+      tags: [Catalog]
+      summary: Promotional products for a supermarket
+      description: |
+        Returns the subset of the catalog currently on promotion — same shape as
+        `/catalog` but filtered to entries with `promo: true`. Convenient when
+        you only care about discounted SKUs (price-tracker, deal scanner, etc.)
+        without paying for the full `/catalog` dump.
+      operationId: promotions
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PromotionsRequest"
+            examples:
+              coopCh:
+                summary: Coop CH promotions
+                value:
+                  supermarket_domain: coop.ch
+      responses:
+        "200":
+          description: Promotional product list.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PromotionsResponse"
+              examples:
+                coopChSample:
+                  summary: Truncated Coop CH response — pumpkin seeds + a few tortillas
+                  value:
+                    parsed_products:
+                      https://www.coop.ch/de/lebensmittel/brot-backwaren/cracker-knaeckebrot/cracker/gewuerzt/dar-vida-naturaplan-kuerbiskerne-4-portionen/p/5909397:
+                        entity_name: Pumpkin seeds
+                        tags: [bio]
+                        names:
+                          de: Dar-Vida Naturaplan Kürbiskerne, 4 Portionen
+                          en: Dar-Vida Naturaplan pumpkin seeds, 4 portions
+                        self_hosted_image: https://storage.googleapis.com/pepesto_recipe_images/536135b744b1ac17fcea9cb597.webp
+                        price: 395
+                        currency: CHF
+                        promo: true
+                        price_per_meausure_unit: "2.15 CHF / 100g"
+                        quantity_str: 184g
+                        quantity:
+                          Unit: { HundredGrams: 1 }
+                          accurate_grams: 184
+                      https://www.coop.ch/de/lebensmittel/brot-backwaren/haltbare-brote/fladenbrote-tortillas/old-el-paso-flour-tortillas-8-stueck/p/3021010:
+                        entity_name: Tortillas
+                        names:
+                          de: Old El Paso Flour Tortillas 8 Stück
+                          en: Old El Paso Flour Tortillas 8 pieces
+                        self_hosted_image: https://storage.googleapis.com/pepesto_recipe_images/d85f992c81741f6c9f81c5e8b5.webp
+                        price: 455
+                        currency: CHF
+                        promo: true
+                        price_per_meausure_unit: "1.40 / 100g"
+                        quantity_str: 8 pieces
+                        quantity:
+                          Unit: { Pieces: 8 }
+                      https://www.coop.ch/de/lebensmittel/brot-backwaren/haltbare-brote/fladenbrote-tortillas/old-el-paso-street-market-corn-tortillas-glutenfrei-10-stueck/p/5892883:
+                        entity_name: Tortillas
+                        tags: [gluten-free]
+                        names:
+                          de: Old El Paso Street Market Corn Tortillas glutenfrei 10 Stück
+                          en: Old El Paso Street Market Corn Tortillas gluten-free 10 pieces
+                        self_hosted_image: https://storage.googleapis.com/pepesto_recipe_images/77634505be5c54fd476aa3f4ec.webp
+                        price: 494
+                        currency: CHF
+                        promo: true
+                        price_per_meausure_unit: "2.38 / 100g"
+                        quantity_str: 10 pieces
+                        quantity:
+                          Unit: { Pieces: 10 }
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: pep_sk
+      description: |
+        API key minted via `POST /link`. Format: `pep_sk_…`. Pass as
+        `Authorization: Bearer pep_sk_…`.
+
+  schemas:
+    SupermarketDomain:
+      type: string
+      description: |
+        Domain or stable identifier of the target supermarket. See the table below for
+        the 26 supported supermarkets across 13 countries. Need one that isn't here?
+        Contact <https://www.pepesto.com/contact>.
+      enum:
+        - tesco.com
+        - sainsburys.co.uk
+        - asda.com
+        - groceries.morrisons.com
+        - waitrose.com
+        - ah.nl
+        - jumbo.com
+        - plus.nl
+        - shop.rewe.de
+        - coop.ch
+        - migros.ch
+        - farmy.ch
+        - aldi-now.ch
+        - colruyt.be
+        - delhaize.be
+        - tesco.ie
+        - shop.supervalu.ie
+        - dunnesstoresgrocery.com
+        - spesaonline.esselunga.it
+        - spesaonline.conad.it
+        - nemlig.com
+        - meny.no
+        - frisco.pl
+        - zakupy.auchan.pl
+        - bulmag.org
+        - ebag.bg
+      example: tesco.com
+
+    KgToken:
+      type: string
+      minLength: 1
+      description: Opaque recipe handle returned by `/parse` and `/suggest`. Pass to `/products`.
+      example: kg_AbCdEf123
+
+    Currency:
+      type: string
+      enum: [EUR, GBP, CHF, NOK, PLN, BGN, DKK]
+      example: GBP
+
+    Locale:
+      type: string
+      description: BCP 47 locale tag.
+      example: en-GB
+
+    PriceMinor:
+      type: integer
+      minimum: 0
+      description: Price in the smallest currency unit (e.g. pence, cents, øre).
+      example: 199
+
+    Quantity:
+      type: object
+      description: |
+        Quantity per unit. Exactly one field is set depending on how the supermarket
+        sells the product (weighed, liquid, by piece, or by bunch).
+      properties:
+        grams: { type: number, description: Estimated weight per unit in grams. }
+        milliliters: { type: number, description: Volume per unit in millilitres. }
+        pieces: { type: number, description: Number of pieces per unit. }
+        bunches: { type: number, description: Number of bunches per unit. }
+      example: { grams: 500 }
+
+    PricePromotion:
+      type: object
+      properties:
+        promo:
+          type: boolean
+          description: True if the product is currently on promotion.
+        promo_percentage:
+          type: number
+          description: |
+            Price discount percentage. May be absent when the promotion is of a different
+            type (e.g. "buy 2 get 3").
+      example:
+        promo: true
+        promo_percentage: 25
+
+    Price:
+      type: object
+      description: |
+        Price per unit, in the smallest currency unit of the supermarket's currency
+        (e.g. `199` = 1.99 CHF for `coop.ch`).
+      properties:
+        price: { $ref: "#/components/schemas/PriceMinor" }
+        promotion:
+          $ref: "#/components/schemas/PricePromotion"
+      required: [price]
+      example:
+        price: 420
+        promotion: {}
+
+    ProductClassification:
+      type: object
+      properties:
+        is_bio:
+          type: boolean
+          description: Certified organic / bio.
+        is_frozen: { type: boolean }
+        is_substitution:
+          type: boolean
+          description: Set if Pepesto substituted this match for an unavailable item.
+      example: { is_bio: true, is_frozen: false, is_substitution: false }
+
+    IndexedProduct:
+      type: object
+      description: A real supermarket SKU as indexed by Pepesto.
+      properties:
+        product_name:
+          type: string
+          description: Product name in the supermarket's default language.
+        quantity:
+          $ref: "#/components/schemas/Quantity"
+        price:
+          $ref: "#/components/schemas/Price"
+        product_id:
+          type: string
+          description: |
+            Typically the URL of the product page on the supermarket's website.
+        image_url:
+          type: string
+          format: uri
+          description: |
+            URL of a product image. May end in `.webp`; clients targeting non-webp
+            surfaces should skip rendering.
+        universal_id:
+          type: integer
+          format: int64
+          description: |
+            Stable identifier for products sold across multiple supermarket chains
+            (lets you compare prices for the same SKU across stores). Populated only
+            for packaged products commonly sold in multiple chains.
+        classification:
+          $ref: "#/components/schemas/ProductClassification"
+        session_token:
+          type: string
+          description: |
+            Token to pass to `/session` when adding this product to a checkout cart.
+
+    RecipeNutrition:
+      type: object
+      description: Whole-recipe nutrition totals.
+      properties:
+        calories: { type: integer }
+        carbohydrates_grams: { type: integer }
+        protein_grams: { type: integer }
+        fat_grams: { type: integer }
+
+    RecipePortions:
+      type: object
+      description: "Serving range. `{from: 0, to: 0}` means unknown."
+      properties:
+        from: { type: integer }
+        to: { type: integer }
+
+    RetrievedRecipe:
+      type: object
+      properties:
+        kg_token: { $ref: "#/components/schemas/KgToken" }
+        title: { type: string }
+        ingredients:
+          type: array
+          description: Ingredient lines as free-form strings (e.g. "300g flour", "1tsp yeast").
+          items: { type: string }
+        steps:
+          type: array
+          description: Cooking steps in order.
+          items: { type: string }
+        image_url:
+          type: string
+          format: uri
+          description: 1024x1024 WebP image of the recipe. Skip rendering if your surface
+            does not support `.webp`.
+        nutrition:
+          $ref: "#/components/schemas/RecipeNutrition"
+        allergens:
+          type: array
+          description: Allergens detected in the recipe (e.g. `fish`, `eggs`, `mustard`).
+          items: { type: string }
+        portions:
+          $ref: "#/components/schemas/RecipePortions"
+      required: [kg_token, title]
+
+    LinkRequest:
+      type: object
+      properties:
+        email:
+          type: string
+          format: email
+          description: Email address used at Stripe checkout.
+        alias:
+          type: string
+          description: Optional name for this key (useful when minting multiple keys per email).
+      required: [email]
+
+    LinkResponse:
+      type: object
+      properties:
+        api_key:
+          type: string
+          description: The newly minted key. **Returned only once — store immediately.**
+          example: pep_sk_…
+      required: [api_key]
+
+    CreditsResponse:
+      type: object
+      properties:
+        credits_remaining:
+          type: number
+          description: Remaining credit balance (in EUR equivalents).
+        currency:
+          type: string
+          example: EUR
+      required: [credits_remaining]
+
+    OneshotRequest:
+      type: object
+      description: |
+        At least one of `content_urls`, `content_text`, or `content_image` is required.
+      properties:
+        content_urls:
+          type: array
+          items: { type: string, format: uri }
+          description: |
+            URLs of recipes or shopping lists. Each URL must be reachable with a plain
+            HTTP GET — no authentication and no client-side JavaScript. If a page does not
+            meet that bar, scrape it yourself and pass the result via `content_text`.
+        content_text:
+          type: string
+          description: Free-form text describing a recipe or shopping list.
+        content_image:
+          type: string
+          format: uri
+          description: URL of an image of a recipe or shopping list.
+        supermarket_domain:
+          allOf:
+            - $ref: "#/components/schemas/SupermarketDomain"
+          description: |
+            Target supermarket. Optional — if omitted, Pepesto picks one based on the
+            user's location.
+
+    OneshotResponse:
+      type: object
+      properties:
+        redirect_url:
+          type: string
+          format: uri
+          description: |
+            Link to the Pepesto-hosted result page (under `https://s.pepesto.com`) showing
+            the matched products. Open it in a browser or embed it in your site/app as an
+            iframe via the Pepesto widget:
+
+            ```html
+            <div id="pepesto-widget-container"></div>
+            <script src="https://s.pepesto.com/get_recipe.js"
+                    data-source-url="REDIRECT_URL_RETURNED_BY_THE_SHOPPING_API"></script>
+            ```
+      required: [redirect_url]
+
+    ParseRequest:
+      type: object
+      description: Provide exactly one of `recipe_url` or `recipe_text`.
+      properties:
+        recipe_url:
+          type: string
+          format: uri
+          description: Publicly crawlable recipe URL.
+        recipe_text:
+          type: string
+          description: Free-form recipe text.
+        locale:
+          allOf:
+            - $ref: "#/components/schemas/Locale"
+          default: en-GB
+          description: BCP 47 locale to translate the parsed recipe into. Defaults to `en-GB`.
+        generate_image:
+          type: boolean
+          default: false
+          description: If true, generate a 1024x1024 image suitable for the parsed recipe.
+
+    ParseResponse:
+      type: object
+      properties:
+        recipe: { $ref: "#/components/schemas/RetrievedRecipe" }
+      required: [recipe]
+
+    Personalization:
+      type: object
+      description: |
+        Optional preferences to tailor recipe retrieval. Stored on the API key for
+        future calls.
+      properties:
+        locale:
+          allOf:
+            - $ref: "#/components/schemas/Locale"
+          default: en-UK
+          description: BCP 47 locale to translate the recipes into. Defaults to `en-UK`.
+        portions:
+          type: integer
+          default: 3
+          description: Number of people the recipes should serve. Recipes are scaled
+            accordingly. Defaults to 3.
+        supermarket_domain:
+          allOf:
+            - $ref: "#/components/schemas/SupermarketDomain"
+          description: Preferred supermarket. Used to prioritise recipes whose
+            ingredients are available at that store or currently on promotion.
+
+    SuggestRequest:
+      type: object
+      properties:
+        query:
+          type: string
+          minLength: 1
+          description: |
+            Free-text query that may include cuisine, dietary tags, ingredients to include
+            or avoid, time constraints, and servings.
+        personalization:
+          $ref: "#/components/schemas/Personalization"
+      required: [query]
+
+    SuggestResponse:
+      type: object
+      description: Always returns 3 recipes plus a short natural-language reply.
+      properties:
+        recipes:
+          type: array
+          items: { $ref: "#/components/schemas/RetrievedRecipe" }
+        short_response:
+          type: string
+          description: |
+            Short, human-readable reply to the user's query, localised to the user's
+            language. For multi-turn search, append this to the next request's `query`.
+      required: [recipes]
+
+    ProductMatch:
+      type: object
+      description: |
+        A concrete product offered for an ingredient line, with a suggested quantity to
+        buy. The list inside `ItemMatch.products` is sorted: the first item is the
+        recommended pick.
+      properties:
+        product: { $ref: "#/components/schemas/IndexedProduct" }
+        session_token:
+          type: string
+          description: |
+            Token to pass to `/session` when adding this product to a checkout cart.
+        num_units_to_buy:
+          type: integer
+          minimum: 0
+          description: |
+            Number of units to buy. `0` means "checklist item" — Pepesto does not
+            suggest buying it by default, but surfaces it in the UI as a reminder
+            (useful for pantry staples like salt).
+
+    ItemMatch:
+      type: object
+      description: |
+        One ingredient line and the ranked products offered for it. Sorting accounts for
+        user preferences and past purchases, food-waste / cost minimisation, bio /
+        quality preference, and product reviews. An empty `products` array means no
+        suitable match was found in the index — the Pepesto UI may still offer
+        alternatives at checkout.
+      properties:
+        item_name:
+          type: string
+          description: Normalised ingredient name (e.g. "olive oil").
+        products:
+          type: array
+          items: { $ref: "#/components/schemas/ProductMatch" }
+
+    ProductsRequest:
+      type: object
+      properties:
+        recipe_kg_tokens:
+          type: array
+          minItems: 1
+          items: { $ref: "#/components/schemas/KgToken" }
+          description: Tokens from `/parse` or `/suggest`.
+        manual_shopping_list:
+          type: string
+          maxLength: 5000
+          description: |
+            Free-text shopping list (e.g. "4 eggs, pasta, 2 chicken breasts"). Max 5000
+            characters.
+        supermarket_domain:
+          allOf:
+            - $ref: "#/components/schemas/SupermarketDomain"
+          description: |
+            Target supermarket. Optional — if omitted, Pepesto picks one based on the
+            user's location.
+        user_id:
+          type: string
+          description: |
+            Personalisation handle used to tailor offered products to the user's
+            preferences (e.g. allergies, past purchases).
+        item_names_locale:
+          allOf:
+            - $ref: "#/components/schemas/Locale"
+          description: BCP 47 locale to display item names in (e.g. `de-DE`).
+        as_of_date:
+          type: string
+          pattern: '^\d{4}-\d{2}-\d{2}$'
+          description: |
+            `YYYY-MM-DD` — query historical prices and matches as of this date.
+            Pepesto tracks history from **2026-04-29** onwards; earlier dates are not
+            available. Omit for current data.
+      required: [recipe_kg_tokens]
+
+    ProductsResponse:
+      type: object
+      properties:
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/ItemMatch" }
+        missing_items:
+          type: array
+          items: { type: string }
+          description: |
+            Requested items for which no suitable match was found — either absent from
+            the index, or unavailable at the chosen supermarket.
+        currency: { $ref: "#/components/schemas/Currency" }
+
+    Sku:
+      type: object
+      properties:
+        session_token:
+          type: string
+          description: From `ProductMatch.session_token` in `/products` response.
+        num_units_to_buy:
+          type: integer
+          minimum: 0
+      required: [session_token, num_units_to_buy]
+
+    SessionRequest:
+      type: object
+      properties:
+        supermarket_domain: { $ref: "#/components/schemas/SupermarketDomain" }
+        user_locale:
+          allOf:
+            - $ref: "#/components/schemas/Locale"
+          description: BCP 47 locale used by Pepesto's checkout agent.
+        skus:
+          type: array
+          items: { $ref: "#/components/schemas/Sku" }
+          description: |
+            SKUs returned by `/products` (one entry per `session_token` you want in the
+            cart). Provide `skus`, `unresolved_items`, or both.
+        unresolved_items:
+          type: array
+          items: { type: string }
+          description: |
+            Free-text items that have not been matched to concrete SKUs. The Pepesto
+            checkout agent will search for these on the supermarket's site at run time.
+        charge_user:
+          type: boolean
+          description: |
+            If true, the end user is billed directly for session creation instead of
+            consuming this API key's credits. Pepesto creates a hosted payment link
+            and returns it as `payment_redirect_url`. The session is only ready for
+            checkout once the user completes payment — wait for `charge_user_webhook`
+            (if set) before driving `/checkout`.
+
+            The user is charged in the supermarket's local currency.
+        charge_user_amount:
+          type: number
+          format: float
+          description: |
+            Extra amount in **euros** added on top of Pepesto's base session price when
+            `charge_user` is true. The base + extra is collected from the user;
+            the extra is credited back to this API key (cashable on request — contact
+            support@pepesto.com). Pepesto converts to the supermarket's currency at
+            redirect time.
+        charge_user_webhook:
+          type: string
+          format: uri
+          description: |
+            URL Pepesto calls after a successful user payment to signal that the session
+            is ready. Only meaningful when `charge_user` is true.
+      required: [supermarket_domain]
+
+    SessionResponse:
+      type: object
+      properties:
+        session_id:
+          type: string
+          description: |
+            Always returned. Feed it to `/checkout` to drive the supermarket's site.
+            When `charge_user` was true in the request, the session exists but is not
+            ready until the user has paid — wait for the `charge_user_webhook` callback.
+        payment_redirect_url:
+          type: string
+          format: uri
+          description: |
+            Hosted payment link to redirect the user to. Returned only when
+            `charge_user` was set to true in the request.
+      required: [session_id]
+
+    PrevTurnResponse:
+      type: object
+      description: |
+        Outcome of whatever the client did on the previous turn — running JS in a
+        browser, performing a native action on iOS, calling an HTTP service from
+        a server agent, prompting a user in a chat surface, etc. The `result` /
+        `error` pair is the lowest-common-denominator shape; richer instruction
+        kinds may extend it with extra fields.
+
+        A non-empty `error` means failure — the server prefers `error` over
+        `result` in that case.
+      properties:
+        result:
+          type: string
+          description: |
+            String result of the previous action on success (e.g. a JS return
+            value, a native call's payload, a server-side response).
+        error:
+          type: string
+          description: |
+            Description of why the previous action failed (exception, timeout,
+            user cancellation, etc.). When non-empty, the server treats the turn
+            as failed regardless of `result`.
+      additionalProperties: true
+
+    JavaScriptSpec:
+      type: object
+      description: |
+        Instruction payload for a browser-style `run_js` turn. Other client
+        kinds (iOS, server agent, chat, …) receive their own instruction
+        payloads under their own keys in `proto`.
+
+        The client evaluates `js` (which defines a function named `func`), then
+        invokes that function with no arguments and stringifies its return value
+        into `PrevTurnResponse.result` on the next turn.
+      properties:
+        js:
+          type: string
+          description: JavaScript source defining the entry function.
+        func:
+          type: string
+          description: Name of the entry function to invoke (may be `async`).
+        max_execute_time_msec:
+          type: integer
+          description: |
+            Execution timeout in milliseconds. If `0` or omitted, the client
+            should default to **100000** (100 seconds).
+      required: [js, func]
+
+    CheckoutRequest:
+      type: object
+      description: |
+        External clients **never** create checkout sessions via this API. Always
+        start from a `continue_session_id` obtained out-of-band (e.g. from
+        `/session` or the Pepesto app), and echo it on every subsequent call for
+        the same session.
+      properties:
+        continue_session_id:
+          type: string
+          description: ID of the active driver session to advance.
+        prev_turn_response:
+          allOf:
+            - $ref: "#/components/schemas/PrevTurnResponse"
+          description: |
+            Outcome of the action the client performed in response to the
+            previous turn's instruction. Omit on the very first turn, or when
+            the previous instruction did not require a result.
+        screenshot:
+          type: string
+          format: byte
+          description: |
+            Base64-encoded screenshot of the client surface after executing the
+            previous instruction. Attach when the previous response had
+            `attach_screenshot_on_next_turn: true`. Applicable only to client
+            kinds that have a visual surface (browser, iOS, …).
+      required: [continue_session_id]
+
+    NextCheckoutIterationProto:
+      type: object
+      description: |
+        Server's instruction for this turn. Carries the session id, an optional
+        screenshot request, and exactly one instruction payload — keyed by
+        client kind (e.g. `run_js` for browsers, with iOS / server-agent / chat
+        kinds getting their own keys). Only `run_js` is fully documented today;
+        other instruction payloads are passed through verbatim.
+      properties:
+        session_id:
+          type: string
+          description: The session that was advanced.
+        attach_screenshot_on_next_turn:
+          type: boolean
+          description: |
+            If true, the client should attach a screenshot of its surface as
+            `screenshot` on the next `/checkout` request.
+        run_js:
+          $ref: "#/components/schemas/JavaScriptSpec"
+      required: [session_id]
+      additionalProperties: true
+
+    CheckoutResponse:
+      type: object
+      properties:
+        proto:
+          $ref: "#/components/schemas/NextCheckoutIterationProto"
+      required: [proto]
+
+    CatalogRequest:
+      type: object
+      properties:
+        supermarket_domain: { $ref: "#/components/schemas/SupermarketDomain" }
+      required: [supermarket_domain]
+
+    CatalogQuantity:
+      type: object
+      description: |
+        Structured pack size. The `Unit` discriminator carries exactly one of
+        `HundredGrams`, `Pieces`, or `Milliliters`. `accurate_grams` is set
+        alongside `Unit.HundredGrams` when the supermarket lists a non-rounded
+        weight (e.g. a 340 g pack rounds to `HundredGrams: 3` but
+        `accurate_grams: 340`).
+      properties:
+        Unit:
+          type: object
+          additionalProperties: false
+          properties:
+            HundredGrams:
+              type: integer
+              description: Pack weight in 100-gram units (e.g. `5` = 500 g).
+            Pieces:
+              type: integer
+            Milliliters:
+              type: integer
+        accurate_grams:
+          type: integer
+          description: Exact pack weight in grams when known.
+      required: [Unit]
+
+    CatalogProduct:
+      type: object
+      description: |
+        One indexed product. Returned by both `/catalog` (full dump) and
+        `/promotions` (subset with `promo: true`). All optional fields are best
+        effort and may be absent depending on the supermarket.
+      properties:
+        entity_name:
+          type: string
+          description: Pepesto's normalised category (e.g. "Grapes", "Tortillas").
+        names:
+          type: object
+          description: |
+            Localised display names. Keys are language codes; `en` is provided
+            as a fallback alongside the supermarket's primary locale.
+          additionalProperties:
+            type: string
+          example:
+            en: AH Red seedless grapes
+            nl: AH Rode druiven pitloos
+        price: { $ref: "#/components/schemas/PriceMinor" }
+        currency: { $ref: "#/components/schemas/Currency" }
+        promo:
+          type: boolean
+          description: |
+            True when the product is currently on promotion. Always `true` on
+            `/promotions`; may be `true` or omitted on `/catalog`.
+        quantity_str:
+          type: string
+          description: |
+            Human-readable pack size as shown on the supermarket page
+            (e.g. "500g", "1 piece", "1 l").
+        quantity:
+          $ref: "#/components/schemas/CatalogQuantity"
+        price_per_meausure_unit:
+          type: string
+          description: |
+            Free-form per-measure-unit price string sourced from the supermarket
+            (e.g. `"2.15 CHF / 100g"`, `"1.40 / 100g"`). **Note:** the field name
+            is misspelled on the wire (`meausure` instead of `measure`); the
+            spec preserves the wire spelling.
+        self_hosted_image:
+          type: string
+          format: uri
+          description: |
+            Pepesto-hosted product image (`.webp`, under
+            `https://storage.googleapis.com/pepesto_recipe_images/`). Skip
+            rendering if your surface does not support `.webp`.
+        tags:
+          type: array
+          items: { type: string }
+          description: |
+            Free-form tags surfaced by the supermarket (e.g. `bio`, `canned`,
+            `gluten-free`, `frozen`).
+      required: [entity_name, names, price, currency]
+
+    CatalogResponse:
+      type: object
+      properties:
+        parsed_products:
+          type: object
+          description: |
+            Map keyed by the canonical product URL on the supermarket's site.
+            Values are the parsed catalog entries.
+          additionalProperties:
+            $ref: "#/components/schemas/CatalogProduct"
+      required: [parsed_products]
+
+    PromotionsRequest:
+      type: object
+      properties:
+        supermarket_domain: { $ref: "#/components/schemas/SupermarketDomain" }
+      required: [supermarket_domain]
+
+    PromotionsResponse:
+      type: object
+      description: |
+        Same shape as `CatalogResponse`, filtered to products currently on
+        promotion. All entries have `promo: true`.
+      properties:
+        parsed_products:
+          type: object
+          description: |
+            Map keyed by the canonical product URL on the supermarket's site.
+            Values are `CatalogProduct` entries with `promo: true`.
+          additionalProperties:
+            $ref: "#/components/schemas/CatalogProduct"
+      required: [parsed_products]
