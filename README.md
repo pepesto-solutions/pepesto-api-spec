@@ -1,6 +1,6 @@
-# Pepesto Grocery API
+# Pepesto Grocery Shopping API
 
-API specification for the [Pepesto Grocery API](https://www.pepesto.com/ai-grocery-shopping-agent/) — turn any recipe (a URL, plain text, or a photo) into a matched basket of real supermarket products with live prices, across **26 European supermarkets in 13 countries**. This [README.md](https://github.com/pepesto-solutions/pepesto-api-spec/blob/main/README.md) and the [`openapi.yaml`](https://github.com/pepesto-solutions/pepesto-api-spec/blob/main/openapi.yaml) spec are also accessible under the [pepesto-api-spec](https://github.com/pepesto-solutions/pepesto-api-spec) repository.
+API specification for the [Pepesto Grocery API](https://www.pepesto.com/ai-grocery-shopping-agent/) — turn any recipe (a URL, plain text, or a photo) into a matched basket of real supermarket products with live prices, across **26 European supermarkets in 13 countries**. Pepesto covers the ingredients people actually cook with and the workflows agents, retail-intelligence platforms, and developers actually reach for. The same surface is also exposed as an MCP server for agents — see [pepesto-mcp](https://github.com/pepesto-solutions/pepesto-mcp).
 
 The API covers all 10 public endpoints (`/link`, `/credits`, `/oneshot`, `/parse`, `/suggest`, `/products`, `/session`, `/checkout`, `/catalog`, `/promotions`) with request/response schemas, examples drawn from the [pepesto-api-examples](https://github.com/pepesto-solutions/pepesto-api-examples) repo, and the full enum of supported supermarket domains.
 
