@@ -3,17 +3,18 @@ info:
   title: Pepesto Grocery API
   version: "1.0.0"
   description: |
-    Recipe → matched grocery cart across 26 European supermarkets.
+    Recipe → matched grocery cart across 28 European supermarkets.
 
     The Pepesto Grocery API turns a recipe (URL, free-form text, or image) into a matched
-    basket of real supermarket products with live prices, across 26 European supermarkets in
+    basket of real supermarket products with live prices, across 28 European supermarkets in
     13 countries. It also exposes the recipe knowledge graph, full catalog dumps, promotional
-    SKUs, and a session/checkout pair for driving automated cart fill on the supermarket's
-    own site.
+    SKUs, a broad asynchronous product search, and a session/checkout pair for driving
+    automated cart fill on the supermarket's own site.
 
     ## Authentication
 
-    All endpoints except `POST /link` require a Bearer token in the `Authorization` header:
+    All endpoints except `POST /link` and `POST /predirect` require a Bearer token in the
+    `Authorization` header:
 
     ```
     Authorization: Bearer pep_sk_…
@@ -25,22 +26,24 @@ info:
 
     ## Pricing model
 
-    Pay-as-you-go credits, billed per call. `POST /credits` and `POST /link` are free.
-    Per-call prices are documented under each endpoint and at
-    <https://www.pepesto.com/pricing/>. Credits never expire.
+    A monthly subscription turns into credits on your API key, and every call draws those
+    credits down at that endpoint's rate. Unused credits roll over and never expire.
+    `POST /link`, `POST /credits`, `POST /checkout`, `POST /retrieve` and `POST /predirect`
+    cost nothing. Per-call prices live at <https://www.pepesto.com/pricing/>.
 
     ## Common shapes
 
     - **Prices** are integers in the smallest currency unit (e.g. cents, pence, øre).
     - **`KgToken`** is an opaque recipe handle returned by `/parse` and `/suggest` that you
       pass to `/products` to map ingredients to real SKUs.
-    - **`session_token`** is a per-product handle from `/products` you pass to `/session`.
-    - **Currencies**: EUR, GBP, CHF, NOK, PLN, BGN, DKK.
+    - **`session_token`** is a per-product handle from `/products` you pass to `/session`
+      or `/mcheckout`.
+    - **Currencies**: EUR, GBP, CHF, NOK, PLN, BGN, DKK, SEK.
 
     ## Reference implementations
 
     - MCP server: <https://github.com/pepesto-solutions/pepesto-mcp>
-    - Code examples (one per supermarket): <https://github.com/pepesto-solutions/pepesto-api-examples>
+    - Code examples, one per use case: <https://github.com/pepesto-solutions/api-examples>
   contact:
     name: Pepesto
     url: https://www.pepesto.com/contact
@@ -166,6 +169,45 @@ paths:
                   summary: Pepesto-hosted result page
                   value:
                     redirect_url: https://app.pepesto.com/composed?force=1&req=GigKJmFsc28g
+
+  /predirect:
+    post:
+      tags: [Cart]
+      summary: Hand a shopping list to the Pepesto app
+      description: |
+        Ends up in the same place as `/oneshot` — a shopping list becomes a matched
+        basket and Pepesto takes the user through checkout — but the work happens later
+        and the end user pays for it. The call returns a deferred deep link straight
+        away; parsing and product matching only run once the user opens that link. If
+        the app is not installed the user is sent to the App Store or Google Play first,
+        and the shopping list is held until the app opens.
+
+        Free to the API client, and public: no API key is required.
+      operationId: predirect
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PredirectRequest"
+            examples:
+              basic:
+                summary: A three-line shopping list
+                value:
+                  shopping_list: "2 avocados\n1 loaf of bread\n500 g tomatoes"
+      responses:
+        "200":
+          description: Deep link created.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PredirectResponse"
+              examples:
+                created:
+                  summary: Deferred deep link to the Pepesto app
+                  value:
+                    redirect_url: https://s.pepesto.com/d/eyJzaG9wcGluZ19saXN0X2lkIjoibHN0XzAxSFpBQjdXSzQifQ==
 
   /parse:
     post:
@@ -505,6 +547,105 @@ paths:
                     missing_items: [onion powder]
                     currency: GBP
 
+  /search:
+    post:
+      tags: [Cart]
+      summary: Start a broad asynchronous product search
+      description: |
+        `/search` and `/products` both turn a product request into real supermarket
+        products. `/products` reads Pepesto's daily cache of the 1,000–2,000 SKUs people
+        cook with, so it answers immediately. `/search` looks at the whole store — wine,
+        cosmetics, ready meals, anything outside that cache — which is why it runs
+        asynchronously, takes longer, and costs more.
+
+        The call returns a `search_session_id` right away. Results are usually ready
+        within ten minutes, and heavy traffic can stretch that. Either poll `/retrieve`
+        with the id, or pass `webhook_url` and Pepesto will POST to it as soon as the
+        results are ready, with the session id appended as the `sid` query parameter.
+
+        A search session and its results are kept for 14 days and then permanently
+        deleted, so store anything you need on your own side.
+      operationId: search
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SearchRequest"
+            examples:
+              withWebhook:
+                summary: Search Coop CH and get called back when it is done
+                value:
+                  product: organic strawberries 500g
+                  supermarket_domain: coop.ch
+                  webhook_url: https://example.com/hooks/pepesto-search
+              polling:
+                summary: Search and poll /retrieve instead
+                value:
+                  product: alcohol-free lager, 6-pack
+                  supermarket_domain: tesco.com
+      responses:
+        "200":
+          description: Search accepted.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SearchResponse"
+              examples:
+                accepted:
+                  value:
+                    search_session_id: srch_01HZAB7WK4
+
+  /retrieve:
+    post:
+      tags: [Cart]
+      summary: Check and collect an asynchronous search
+      description: |
+        Reports where a search started with `/search` has got to, and returns the matched
+        products once it is finished. Poll until `status` is `done`. Free.
+      operationId: retrieveSearch
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RetrieveRequest"
+            examples:
+              basic:
+                value:
+                  search_session_id: srch_01HZAB7WK4
+      responses:
+        "200":
+          description: Current state of the search.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RetrieveResponse"
+              examples:
+                stillRunning:
+                  summary: Not ready yet — poll again
+                  value:
+                    status: in_progress
+                done:
+                  summary: Finished, with one entry per requested item
+                  value:
+                    status: done
+                    currency: CHF
+                    items:
+                      - item_name: organic strawberries 500g
+                        products:
+                          - product:
+                              product_name: Coop Naturaplan Bio-Erdbeeren 500g
+                              category: berries
+                              quantity: { grams: 500 }
+                              price:
+                                price: 695
+                              product_id: https://www.coop.ch/de/lebensmittel/p/5904321
+                              classification: { is_bio: true }
+                              session_token: tok_strawberries_a
+                            session_token: tok_strawberries_a
+                            num_units_to_buy: 1
+
   /session:
     post:
       tags: [Checkout]
@@ -650,6 +791,55 @@ paths:
                           }
                         func: readCartTotal
                         max_execute_time_msec: 0
+
+  /mcheckout:
+    post:
+      tags: [Checkout]
+      summary: Hand the checkout loop to the Pepesto app
+      description: |
+        Takes the same request as `/session`, but instead of a session you drive yourself
+        it returns a deferred deep link to the Pepesto mobile app. The app opens if it is
+        installed, otherwise the user is sent to the App Store or Google Play. It then
+        runs the checkout loop, fills the basket with the SKUs you passed, and returns
+        the user to your `redirect_url` with the supermarket cart URL appended as the
+        escaped `cartUrl` query parameter. Without a `redirect_url` the user is left on
+        the supermarket's own cart or login page.
+
+        Your user stays your user. The app remembers that they arrived through an
+        integrated client and stays locked to checkout — meal planning, recipe search and
+        promotions are not available, and it stays that way if they open the app again
+        later.
+      operationId: mcheckout
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SessionRequest"
+            examples:
+              basketWithReturnUrl:
+                summary: Two Coop CH SKUs, with a return URL
+                value:
+                  supermarket_domain: coop.ch
+                  redirect_url: https://example.com/checkout-complete
+                  skus:
+                    - session_token: eyJwcm9kdWN0X2lkIjogImh0dHBzOi8vY29vcC5jaC9wYXN0YS8xMjMifQ==
+                      num_units_to_buy: 1
+                    - session_token: eyJwcm9kdWN0X2lkIjogImh0dHBzOi8vY29vcC5jaC90b21hdG9lcy80NTYifQ==
+                      num_units_to_buy: 2
+      responses:
+        "200":
+          description: Deep link created.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SessionResponse"
+              examples:
+                created:
+                  summary: Send the user to mobile_hosted_url
+                  value:
+                    session_id: sess_01HZAB7WK4
+                    mobile_hosted_url: https://s.pepesto.com/m/eyJzZXNzaW9uX2lkIjoic2Vzc18wMUhaQUI3V0s0In0=
 
   /catalog:
     post:
@@ -828,7 +1018,7 @@ components:
       type: string
       description: |
         Domain or stable identifier of the target supermarket. See the table below for
-        the 26 supported supermarkets across 13 countries. Need one that isn't here?
+        the 28 supported supermarkets across 13 countries. Need one that isn't here?
         Contact <https://www.pepesto.com/contact>.
       enum:
         - tesco.com
@@ -836,16 +1026,17 @@ components:
         - asda.com
         - groceries.morrisons.com
         - waitrose.com
+        - ocado.com
         - ah.nl
         - jumbo.com
         - plus.nl
         - shop.rewe.de
         - coop.ch
         - migros.ch
-        - farmy.ch
         - aldi-now.ch
         - colruyt.be
         - delhaize.be
+        - ah.be
         - tesco.ie
         - shop.supervalu.ie
         - dunnesstoresgrocery.com
@@ -855,8 +1046,9 @@ components:
         - meny.no
         - frisco.pl
         - zakupy.auchan.pl
-        - bulmag.org
         - ebag.bg
+        - handlaprivatkund.ica.se
+        - continente.pt
       example: tesco.com
 
     KgToken:
@@ -867,7 +1059,7 @@ components:
 
     Currency:
       type: string
-      enum: [EUR, GBP, CHF, NOK, PLN, BGN, DKK]
+      enum: [EUR, GBP, CHF, NOK, PLN, BGN, DKK, SEK]
       example: GBP
 
     Locale:
@@ -941,6 +1133,9 @@ components:
         product_name:
           type: string
           description: Product name in the supermarket's default language.
+        category:
+          type: string
+          description: Product category (e.g. "canned tomatoes", "pasta").
         quantity:
           $ref: "#/components/schemas/Quantity"
         price:
@@ -955,6 +1150,12 @@ components:
           description: |
             URL of a product image. May end in `.webp`; clients targeting non-webp
             surfaces should skip rendering.
+        pepesto_hosted_image_url:
+          type: string
+          format: uri
+          description: |
+            The same image hosted by Pepesto rather than the retailer, for clients that
+            cannot hotlink to the supermarket's own assets.
         universal_id:
           type: integer
           format: int64
@@ -1087,6 +1288,31 @@ components:
             <script src="https://s.pepesto.com/get_recipe.js"
                     data-source-url="REDIRECT_URL_RETURNED_BY_THE_SHOPPING_API"></script>
             ```
+      required: [redirect_url]
+
+    PredirectRequest:
+      type: object
+      properties:
+        shopping_list:
+          type: string
+          description: |
+            Free-form shopping list. It may run over several lines and may name at most
+            30 ingredients.
+        locale:
+          allOf:
+            - $ref: "#/components/schemas/Locale"
+          description: The user's locale (e.g. `de-DE`).
+      required: [shopping_list]
+
+    PredirectResponse:
+      type: object
+      properties:
+        redirect_url:
+          type: string
+          format: uri
+          description: |
+            Deferred deep link to the Pepesto mobile app. Opening it starts the parse and
+            match of the shopping list sent in the request.
       required: [redirect_url]
 
     ParseRequest:
@@ -1253,6 +1479,57 @@ components:
             the index, or unavailable at the chosen supermarket.
         currency: { $ref: "#/components/schemas/Currency" }
 
+    SearchRequest:
+      type: object
+      properties:
+        product:
+          type: string
+          description: |
+            Free-text description of what to look for (e.g. "organic strawberries 500g,
+            H-Milch 3.5% 1L, free-range eggs 10-pack").
+        supermarket_domain: { $ref: "#/components/schemas/SupermarketDomain" }
+        webhook_url:
+          type: string
+          format: uri
+          description: |
+            Called with an HTTP POST and an empty body once the search is finished.
+            Pepesto appends the session id as a `sid` query parameter.
+      required: [product, supermarket_domain]
+
+    SearchResponse:
+      type: object
+      properties:
+        search_session_id:
+          type: string
+          description: Pass to `/retrieve` to check the search and collect its results.
+      required: [search_session_id]
+
+    RetrieveRequest:
+      type: object
+      properties:
+        search_session_id:
+          type: string
+          description: The id returned by `/search`.
+      required: [search_session_id]
+
+    RetrieveResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          enum: [queued, in_progress, done]
+          description: |
+            `queued` means accepted but not started, `in_progress` means running, and
+            `done` means the results are in `items`.
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/ItemMatch" }
+          description: |
+            Only present once `status` is `done`. Holds exactly as many entries as the
+            original `/search` request asked for.
+        currency: { $ref: "#/components/schemas/Currency" }
+      required: [status]
+
     Sku:
       type: object
       properties:
@@ -1272,6 +1549,13 @@ components:
           allOf:
             - $ref: "#/components/schemas/Locale"
           description: BCP 47 locale used by Pepesto's checkout agent.
+        redirect_url:
+          type: string
+          format: uri
+          description: |
+            Where to send the user once checkout is done. Used by `/mcheckout`, which
+            appends the supermarket's cart URL as the escaped `cartUrl` query parameter.
+            Leave it out and the user stays on the supermarket's cart or login page.
         skus:
           type: array
           items: { $ref: "#/components/schemas/Sku" }
@@ -1326,6 +1610,12 @@ components:
           description: |
             Hosted payment link to redirect the user to. Returned only when
             `charge_user` was set to true in the request.
+        mobile_hosted_url:
+          type: string
+          format: uri
+          description: |
+            Deferred deep link to the Pepesto mobile app, returned by `/mcheckout`. Send
+            the user there and the app runs the checkout loop for this session.
       required: [session_id]
 
     PrevTurnResponse:
