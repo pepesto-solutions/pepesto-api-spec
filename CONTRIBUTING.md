@@ -1,6 +1,6 @@
 # Contributing
 
-The canonical source is [`openapi.yaml`](./openapi.yaml). Everything else (bundled JSON, rendered HTML, the [pepesto-mcp](https://github.com/pepesto-solutions/pepesto-mcp) server, the [pepesto-api-examples](https://github.com/pepesto-solutions/pepesto-api-examples) snippets) is generated or hand-maintained downstream.
+The canonical source is [`openapi.yaml`](./openapi.yaml). Everything else (bundled JSON, rendered HTML, the [pepesto-mcp](https://github.com/pepesto-solutions/pepesto-mcp) server, the [api-examples](https://github.com/pepesto-solutions/api-examples) snippets) is generated or hand-maintained downstream.
 
 ## Validate locally
 
